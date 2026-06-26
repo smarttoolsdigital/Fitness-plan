@@ -163,8 +163,34 @@
   .h-row span:first-child{ color:var(--bone); font-family:'JetBrains Mono',monospace; }
   .empty-hist{ color:var(--bone-dim); font-size:12.5px; text-align:center; padding:8px 0; }
 
+  .consistency-line{ text-align:center; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:var(--bone-dim); margin:-4px 0 14px; letter-spacing:.03em; }
+  .rest-toggle-link{ text-align:center; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--bone-dim); margin-top:10px; cursor:pointer; text-decoration:underline; }
+  .rest-panel{ border-color:var(--crimson); margin-top:10px; }
+  .rest-panel-title{ font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+  .rest-panel-msg{ font-size:12.5px; color:var(--bone-dim); font-family:Arial,sans-serif; line-height:1.5; margin-bottom:12px; }
+  .rp-btn{ display:block; width:100%; text-align:center; padding:11px; border-radius:7px; margin-bottom:8px;
+    font-family:'JetBrains Mono',monospace; font-size:12px; cursor:pointer; border:1px solid var(--line);
+    background:var(--surface-2); color:var(--bone); letter-spacing:.02em; }
+  .rp-btn:last-child{ margin-bottom:0; }
+  .rp-primary{ background:linear-gradient(135deg, var(--crimson), var(--crimson-bright)); border-color:var(--crimson-bright); font-weight:600; }
+  .rp-secondary{ border-style:dashed; border-color:var(--gold); color:var(--gold); background:transparent; }
+  .rp-ghost{ background:transparent; color:var(--bone-dim); border-color:transparent; text-decoration:underline; }
+
+  .accountability-card{ border-color:var(--gold); }
+  .acc-title{ font-family:'JetBrains Mono',monospace; font-size:10.5px; letter-spacing:.14em; color:var(--gold); text-transform:uppercase; margin-bottom:8px; }
+  .acc-headline{ font-size:14.5px; font-weight:600; margin-bottom:4px; }
+  .acc-body{ font-size:12.5px; color:var(--bone-dim); font-family:Arial,sans-serif; line-height:1.5; margin-bottom:4px; }
+  .acc-log-row{ display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
+  .acc-log-label{ font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--bone-dim); letter-spacing:.05em; }
+  .chip-row{ display:flex; gap:6px; }
+  .chip{ font-family:'JetBrains Mono',monospace; font-size:11.5px; padding:6px 10px; border-radius:14px;
+    border:1px solid var(--line); background:var(--surface-2); color:var(--bone-dim); cursor:pointer; }
+  .rp-btn:disabled{ opacity:.6; cursor:default; }
+  .chip.active{ background:var(--gold); border-color:var(--gold); color:#1a1408; font-weight:600; }
+
   .footer-row{ display:flex; justify-content:space-between; align-items:center; margin-top:22px; }
   .reset-link{ color:var(--bone-dim); font-size:11px; font-family:'JetBrains Mono',monospace; cursor:pointer; text-decoration:underline; }
+  .save-warn{ color:var(--gold); font-size:11px; font-family:'JetBrains Mono',monospace; cursor:pointer; }
   .loading{ text-align:center; padding:60px 0; color:var(--bone-dim); font-family:'JetBrains Mono',monospace; }
 </style>
 </head>
@@ -242,9 +268,13 @@ const RECOVERY = {
 let state = null;
 let viewDay = 1;
 let saving = false;
+let pendingSave = false;
+let saveIssue = false;
+let showRestPanel = false;
+let askingPartner = false;
 
 function defaultState(){
-  return { currentDay:1, checks:{}, customNames:{}, history:[], cycleCount:0 };
+  return { currentDay:1, checks:{}, customNames:{}, history:[], cycleCount:0, alcoholLog:{}, aiPartnerMsg:null, aiPartnerMsgDate:null };
 }
 
 async function loadState(){
@@ -254,19 +284,29 @@ async function loadState(){
   }catch(e){
     state = defaultState();
   }
+  state = Object.assign(defaultState(), state);
   viewDay = state.currentDay;
   render();
 }
 
 async function saveState(){
-  if(saving) return;
+  if(saving){ pendingSave = true; return; }
   saving = true;
-  try{
-    await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
-  }catch(e){
-    console.error('save failed', e);
+  pendingSave = false;
+  let ok = false;
+  for(let attempt=1; attempt<=3 && !ok; attempt++){
+    try{
+      await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
+      ok = true;
+    }catch(e){
+      if(attempt === 3) console.error('save failed after 3 attempts', e);
+      else await new Promise(r => setTimeout(r, 350*attempt));
+    }
   }
+  saveIssue = !ok;
   saving = false;
+  if(pendingSave){ saveState(); }
+  else if(!ok){ render(); }
 }
 
 function dayDef(n){ return CYCLE.find(d => d.day === n); }
@@ -292,7 +332,7 @@ function completeDay(){
   const def = dayDef(state.currentDay);
   const now = new Date();
   const dateStr = now.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-  state.history.unshift({date:dateStr, day:state.currentDay, title:def.title});
+  state.history.unshift({date:dateStr, iso:now.toISOString(), day:state.currentDay, title:def.title});
   state.history = state.history.slice(0,20);
   if(state.currentDay >= CYCLE_LENGTH){
     state.currentDay = 1;
@@ -302,6 +342,150 @@ function completeDay(){
   }
   state.checks = {};
   viewDay = state.currentDay;
+  showRestPanel = false;
+  saveState();
+  render();
+}
+
+function getConsistency(){
+  const cutoff = Date.now() - 14*24*60*60*1000;
+  const recent = state.history.filter(h => h.iso && new Date(h.iso).getTime() >= cutoff);
+  const rested = recent.filter(h => h.type === 'shift' || h.type === 'skip').length;
+  const trained = recent.length - rested;
+  let streak = 0;
+  for(const h of state.history){
+    if(h.type === 'shift' || h.type === 'skip') break;
+    streak++;
+  }
+  return {trained, rested, total: recent.length, streak};
+}
+
+function restPanelMessage(c){
+  if(c.rested >= 3){
+    return `You've stepped back ${c.rested}× in the last two weeks. No lecture here — the only move that matters now is not losing the next one.`;
+  } else if(c.rested >= 1 || c.streak === 0){
+    return `Life happens. Pick how you want to handle today — streak is currently ${c.streak}.`;
+  }
+  return `Streak: ${c.streak}. First step back is the cheap one — pick an option and keep moving.`;
+}
+
+function openRestPanel(){ showRestPanel = true; render(); }
+function dismissRestPanel(){ showRestPanel = false; render(); }
+
+function dateKey(offsetDays){
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toISOString().slice(0,10);
+}
+
+function logDrinks(offsetDays, tier){
+  state.alcoholLog[dateKey(offsetDays)] = tier;
+  saveState();
+  render();
+}
+
+function getDryStreak(){
+  let streak = 0;
+  let cursor = (state.alcoholLog[dateKey(0)] === undefined) ? -1 : 0;
+  while(true){
+    const v = state.alcoholLog[dateKey(cursor)];
+    if(v === 0){ streak++; cursor--; }
+    else break;
+  }
+  return streak;
+}
+
+function getRecentDrinkLoad(days){
+  let total = 0;
+  for(let i=1;i<=days;i++){
+    const v = state.alcoholLog[dateKey(-i)];
+    if(v) total += v;
+  }
+  return total;
+}
+
+function getAccountabilityAdvice(){
+  const yVal = state.alcoholLog[dateKey(-1)];
+  const streak = getDryStreak();
+  const def = dayDef(state.currentDay);
+  const intense = def.phase === 'ANTERIOR' || def.phase === 'POSTERIOR' || def.phase === 'BURNOUT';
+  let headline, body, showShiftCta = false;
+  if(yVal === undefined){
+    headline = "Log yesterday to get today's read.";
+    body = "Tap a chip below — none, 1–2, or 3+. Two seconds.";
+  } else if(yVal === 0){
+    headline = streak >= 3 ? `${streak} days clean. That compounds.` : 'Clean yesterday — train at full intensity.';
+    body = "No adjustment needed. Go after today's session as written.";
+  } else if(yVal === 1){
+    headline = 'Light drinking logged yesterday.';
+    body = "Hydrate and eat real protein before you train. Don't be surprised if the top of your rep ranges feels heavier than usual.";
+  } else {
+    headline = 'Heavier night logged yesterday.';
+    body = intense
+      ? "Today's a demanding day on the plan and your body's still paying it down. Worth considering a lighter approach or shifting today."
+      : "Today's already light, which works in your favor. Hydrate hard and keep it easy.";
+    showShiftCta = intense;
+  }
+  return {headline, body, showShiftCta};
+}
+
+async function askPartner(){
+  askingPartner = true;
+  render();
+  const yVal = state.alcoholLog[dateKey(-1)];
+  const yLabel = yVal === undefined ? 'not logged' : yVal === 0 ? 'none' : yVal === 1 ? '1–2 drinks' : '3+ drinks';
+  const streak = getDryStreak();
+  const recentLoad = getRecentDrinkLoad(7);
+  const def = dayDef(state.currentDay);
+  const prompt = `You are a blunt, grounded accountability partner inside a personal fitness app for a disciplined, no-fluff guy rebuilding consistency. Max 2 sentences. No lectures, no clinical tone, no generic motivational language — direct and real, like someone who respects him too much to coddle him.
+Context: yesterday's drinking: ${yLabel}. Current dry streak: ${streak} day(s). Rough load over the last 7 days (weighted, 0=light..14=heavy): ${recentLoad}. Today's training: "${def.title}" (${def.phase} phase).
+Give him a short, specific read on today given this context. Do not invent facts not given above.`;
+  try{
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ model:'claude-sonnet-4-6', max_tokens:200, messages:[{role:'user', content: prompt}] })
+    });
+    const data = await res.json();
+    const text = (data.content||[]).map(b=>b.text||'').join(' ').trim();
+    if(text){
+      state.aiPartnerMsg = text;
+      state.aiPartnerMsgDate = dateKey(0);
+      saveState();
+    }
+  }catch(e){
+    console.error('partner call failed', e);
+  }
+  askingPartner = false;
+  render();
+}
+
+function shiftPlanDay(){
+  const def = dayDef(state.currentDay);
+  const now = new Date();
+  state.history.unshift({date: now.toLocaleDateString(undefined,{month:'short',day:'numeric'}), iso: now.toISOString(), day: state.currentDay, title: def.title, type:'shift'});
+  state.history = state.history.slice(0,20);
+  // currentDay deliberately NOT advanced — today's session is simply waiting for tomorrow.
+  state.checks = {};
+  showRestPanel = false;
+  saveState();
+  render();
+}
+
+function skipKeepSchedule(){
+  const def = dayDef(state.currentDay);
+  const now = new Date();
+  state.history.unshift({date: now.toLocaleDateString(undefined,{month:'short',day:'numeric'}), iso: now.toISOString(), day: state.currentDay, title: def.title, type:'skip'});
+  state.history = state.history.slice(0,20);
+  if(state.currentDay >= CYCLE_LENGTH){
+    state.currentDay = 1;
+    state.cycleCount += 1;
+  } else {
+    state.currentDay += 1;
+  }
+  state.checks = {};
+  viewDay = state.currentDay;
+  showRestPanel = false;
   saveState();
   render();
 }
@@ -310,15 +494,17 @@ function nav(delta){
   viewDay = viewDay + delta;
   if(viewDay < 1) viewDay = CYCLE_LENGTH;
   if(viewDay > CYCLE_LENGTH) viewDay = 1;
+  showRestPanel = false;
   render();
 }
-function jumpToday(){ viewDay = state.currentDay; render(); }
+function jumpToday(){ viewDay = state.currentDay; showRestPanel = false; render(); }
 
 async function resetAll(){
   if(!confirm('Reset all progress? This clears your cycle position and history.')) return;
   try{ await window.storage.delete(STORAGE_KEY, false); }catch(e){}
   state = defaultState();
   viewDay = 1;
+  showRestPanel = false;
   render();
 }
 
@@ -468,6 +654,54 @@ function renderRecoveryCard(readonly){
   return html;
 }
 
+function renderRestPanel(){
+  const c = getConsistency();
+  const msg = restPanelMessage(c);
+  return `
+  <div class="card rest-panel">
+    <div class="rest-panel-title">Can't train today</div>
+    <div class="rest-panel-msg">${msg}</div>
+    <button class="rp-btn rp-primary" onclick="shiftPlanDay()">Shift the whole plan +1 day</button>
+    <button class="rp-btn rp-secondary" onclick="dismissRestPanel()">Try a 5–10 min mini version instead</button>
+    <button class="rp-btn rp-ghost" onclick="skipKeepSchedule()">Skip it, keep today's slot, move on</button>
+  </div>`;
+}
+
+function renderAccountabilityCard(){
+  const yVal = state.alcoholLog[dateKey(-1)];
+  const tVal = state.alcoholLog[dateKey(0)];
+  const advice = getAccountabilityAdvice();
+  const usingAi = state.aiPartnerMsg && state.aiPartnerMsgDate === dateKey(0);
+
+  function chip(label, tier, offset, current){
+    const active = current === tier;
+    return `<div class="chip ${active?'active':''}" onclick="logDrinks(${offset},${tier})">${label}</div>`;
+  }
+
+  const aiBtn = askingPartner
+    ? `<button class="rp-btn rp-secondary" disabled>thinking…</button>`
+    : `<button class="rp-btn rp-secondary" onclick="askPartner()">${usingAi ? "Refresh the Partner's take" : "Get the Partner's take"}</button>`;
+
+  return `
+  <div class="card accountability-card">
+    <div class="acc-title">Accountability Partner</div>
+    ${usingAi
+      ? `<div class="acc-headline">${state.aiPartnerMsg}</div>`
+      : `<div class="acc-headline">${advice.headline}</div><div class="acc-body">${advice.body}</div>`
+    }
+    ${advice.showShiftCta ? `<button class="rp-btn rp-primary" style="margin-top:8px;" onclick="openRestPanel()">See today's options →</button>` : ''}
+    ${aiBtn}
+    <div class="acc-log-row">
+      <span class="acc-log-label">Yesterday</span>
+      <div class="chip-row">${chip('None',0,-1,yVal)}${chip('1–2',1,-1,yVal)}${chip('3+',2,-1,yVal)}</div>
+    </div>
+    <div class="acc-log-row">
+      <span class="acc-log-label">Today (so far)</span>
+      <div class="chip-row">${chip('None',0,0,tVal)}${chip('1–2',1,0,tVal)}${chip('3+',2,0,tVal)}</div>
+    </div>
+  </div>`;
+}
+
 function render(){
   const def = dayDef(viewDay);
   const isToday = viewDay === state.currentDay;
@@ -494,8 +728,26 @@ function render(){
     ? `<button class="complete-btn" onclick="completeDay()">Complete Day →</button>`
     : `<button class="preview-btn" onclick="jumpToday()">← Jump to today (${weekdayFor(state.currentDay)})</button>`;
 
+  const canRestToggle = isToday && def.type !== 'rest';
+  const restToggleHtml = canRestToggle
+    ? (showRestPanel
+        ? `<div class="rest-toggle-link" onclick="dismissRestPanel()">× close</div>`
+        : `<div class="rest-toggle-link" onclick="openRestPanel()">Can't train today? →</div>`)
+    : '';
+  const restPanelHtml = (canRestToggle && showRestPanel) ? renderRestPanel() : '';
+
+  const c = getConsistency();
+  const consistencyHtml = state.history.length
+    ? `<div class="consistency-line">🔥 streak ${c.streak} · ${c.trained}/${c.total||0} logged last 14 days</div>`
+    : '';
+
+  const accountabilityHtml = isToday ? renderAccountabilityCard() : '';
+
   const histHtml = state.history.length
-    ? state.history.slice(0,6).map(h => `<div class="h-row"><span>${weekdayFor(h.day)}</span><span>${h.title}</span><span>${h.date}</span></div>`).join('')
+    ? state.history.slice(0,6).map(h => {
+        const tag = h.type === 'shift' ? ' · shifted' : h.type === 'skip' ? ' · skipped' : '';
+        return `<div class="h-row"><span>${weekdayFor(h.day)}</span><span>${h.title}${tag}</span><span>${h.date}</span></div>`;
+      }).join('')
     : `<div class="empty-hist">No days logged yet.</div>`;
 
   document.getElementById('app').innerHTML = `
@@ -510,9 +762,13 @@ function render(){
       <div class="status-pill ${isToday?'today':''}" onclick="jumpToday()">${isToday ? 'TODAY · LAP '+lap : 'PREVIEW — TAP TO RETURN'}</div>
       <button class="navbtn" onclick="nav(1)">›</button>
     </div>
+    ${consistencyHtml}
+    ${accountabilityHtml}
 
     ${body}
     ${actionHtml}
+    ${restToggleHtml}
+    ${restPanelHtml}
 
     <div class="history">
       <div class="history-title">Recent log</div>
@@ -520,7 +776,7 @@ function render(){
     </div>
 
     <div class="footer-row">
-      <span></span>
+      <span class="save-warn" ${saveIssue?'':'style="display:none;"'} onclick="saveState()">⚠ sync hiccup — tap to retry</span>
       <span class="reset-link" onclick="resetAll()">reset all progress</span>
     </div>
   `;
